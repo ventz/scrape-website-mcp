@@ -1,0 +1,17 @@
+services:
+  scrape-website-mcp:
+    build:
+      context: .
+      args:
+        SCRAPE_WEBSITE_REF: ${SCRAPE_WEBSITE_REF:-main}
+    image: scrape-website-mcp:local
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN}
+      STATE_DIR: /app/data
+      SCRAPER_USER_AGENT: ${SCRAPER_USER_AGENT:-scrape-website-mcp/0.1}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

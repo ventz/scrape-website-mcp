@@ -1,0 +1,33 @@
+[project]
+name = "scrape-website-mcp"
+version = "0.1.0"
+description = "Self-hosted MCP server that scrapes URLs into an OpenAI vector store with replace-by-URL semantics. Companion to ventz/scrape-website."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [{ name = "Ventz Petkov" }]
+dependencies = [
+    "fastmcp>=2.0",
+    "openai>=1.50",
+    "aiohttp>=3.11",
+    "aiofiles>=24.1",       # upstream scrape-website app.py imports this at module load
+    "aiodns>=3.2",          # likewise
+    "trafilatura>=2.0",
+    "lxml>=5.3",
+    "uvicorn[standard]>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+]
+
+# This is an application, not a library — don't try to build it as a wheel.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["mcp_server/tests"]
