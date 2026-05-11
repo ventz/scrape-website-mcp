@@ -51,6 +51,23 @@ _DEFAULT_UA = os.environ.get(
 _TIMEOUT = aiohttp.ClientTimeout(total=int(os.environ.get("SCRAPER_TIMEOUT", "30")))
 
 
+async def _decode_body(resp: aiohttp.ClientResponse) -> str:
+    """Charset-safe decode. aiohttp's `resp.text()` falls back to chardet when
+    Content-Type lacks a charset, and chardet routinely mis-guesses UTF-8 as
+    Windows-1252 — producing mojibake like `—` → `â€"`. Strategy: prefer the
+    declared charset *unless* it's one of the legacy HTTP defaults that servers
+    send incorrectly; otherwise force UTF-8 with replacement."""
+    raw = await resp.read()
+    declared = (resp.charset or "").lower()
+    # iso-8859-1 / windows-1252 are HTTP/1.1 historical defaults that servers
+    # send when the body is actually UTF-8 — don't trust them.
+    encoding = declared if declared and declared not in ("iso-8859-1", "windows-1252") else "utf-8"
+    try:
+        return raw.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return raw.decode("utf-8", errors="replace")
+
+
 @dataclass
 class FetchResult:
     url: str
@@ -122,7 +139,7 @@ async def fetch_and_extract(url: str) -> FetchResult:
                     result.status = "failed"
                     result.error = f"HTTP {resp.status}"
                     return result
-                html = await resp.text(errors="replace")
+                html = await _decode_body(resp)
     except Exception as e:  # noqa: BLE001
         result.error = f"{type(e).__name__}: {e}"[:240]
         result.status = "failed"
@@ -153,4 +170,4 @@ async def fetch_html(url: str) -> str:
     ) as session:
         async with session.get(url, allow_redirects=True) as resp:
             resp.raise_for_status()
-            return await resp.text()
+            return await _decode_body(resp)
