@@ -57,6 +57,7 @@ Both modes are supported by the same tools; the platform just exercises a smalle
 | `resync_all()` | — | Run `resync_url` for every registered URL with bounded concurrency. Cron-friendly. |
 | `unregister_url(url)` | — | Remove the URL from the vector store and forget it. |
 | `list_registered()` | — | List everything this server is tracking. |
+| `crawl_site(seed_url, max_pages, max_depth, ...)` | — | BFS crawl from a seed URL (same-FQDN scoped), returning markdown for every page reached. Respects robots.txt, configurable depth/page limits and politeness delay. Supports `exclude_patterns` (regex list filtering images/PDFs/static assets by default), `strip_tracking_params` (dedupes UTM variants), and `use_sitemap` (seeds BFS from `/sitemap.xml`). |
 | `server_health()` | — | Cheap status check — DB ok, registered count, last `resync_all` run. |
 
 ---
