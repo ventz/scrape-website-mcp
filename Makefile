@@ -18,8 +18,15 @@ update-scraper:
 		$(MAKE) setup; \
 	else \
 		cd $(VENDOR_DIR) && git fetch --depth 1 origin $(SCRAPE_WEBSITE_REF) \
-			&& git checkout FETCH_HEAD; \
+			&& git reset --hard FETCH_HEAD; \
 	fi
+	@# Why `reset --hard FETCH_HEAD` instead of `checkout FETCH_HEAD`:
+	@# the latter leaves the vendor repo in detached-HEAD state and prints
+	@# a "leaving N commits behind" warning every time upstream advances
+	@# (the shallow clone can't see the parent chain so git thinks the
+	@# old tip is unreferenced). `reset --hard` produces the same working
+	@# tree quietly. Either way the vendored CLI is read-only — we never
+	@# branch / commit / push from here.
 
 run:
 	@# Load .env when present so users don't have to `source` it manually.
