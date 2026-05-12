@@ -23,7 +23,7 @@ from typing import Any
 from fastmcp import FastMCP
 from openai import AsyncOpenAI
 
-from mcp_server import auth, openai_sync, scraper
+from mcp_server import auth, crawler, openai_sync, scraper
 from mcp_server.openai_sync import VectorStoreNotFoundError
 from mcp_server.store import Registration, Store
 
@@ -339,6 +339,40 @@ async def server_health() -> dict[str, Any]:
         "last_resync_all_result": _last_resync_all_result,
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
     }
+
+
+@mcp.tool()
+async def crawl_site(
+    seed_url: str,
+    max_pages: int = 200,
+    max_depth: int = 3,
+    delay_ms: int = 500,
+    respect_robots: bool = True,
+    include_subdomains: bool = False,
+    exclude_patterns: list[str] | None = None,
+    strip_tracking_params: bool = True,
+    use_sitemap: bool = True,
+) -> dict[str, Any]:
+    """BFS crawl from seed_url, returning markdown for every page reached.
+
+    Scope: same FQDN by default (include_subdomains=True relaxes to eTLD+1).
+    Limits: max_pages caps total fetches; max_depth caps BFS depth.
+    Politeness: delay_ms between requests; robots.txt respected by default.
+    Filtering: exclude_patterns (list of regex strings, defaults to images/PDFs/
+    static assets) drops matching URLs; strip_tracking_params removes UTM-style
+    query params before dedup; use_sitemap seeds BFS from /sitemap.xml.
+    """
+    return await crawler.crawl(
+        seed_url,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        delay_ms=delay_ms,
+        respect_robots=respect_robots,
+        include_subdomains=include_subdomains,
+        exclude_patterns=exclude_patterns,
+        strip_tracking_params=strip_tracking_params,
+        use_sitemap=use_sitemap,
+    )
 
 
 # ---------------------------------------------------------------------------
