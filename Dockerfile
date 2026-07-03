@@ -14,10 +14,13 @@ RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-RUN git clone --depth 1 --branch ${SCRAPE_WEBSITE_REF} \
-    ${SCRAPE_WEBSITE_REPO} /app/vendor/scrape-website
-
+# Engine source: prefer a vendor/ checkout in the build context (from
+# `make setup` — lets you build unpushed branches / local changes); fall back
+# to cloning ${SCRAPE_WEBSITE_REF}.
 COPY pyproject.toml ./
+COPY vendo[r] /app/vendor
+RUN [ -d /app/vendor/scrape-website ] || git clone --depth 1 --branch ${SCRAPE_WEBSITE_REF} \
+    ${SCRAPE_WEBSITE_REPO} /app/vendor/scrape-website
 RUN uv sync --no-dev
 
 # Chromium for the JS-render escalation tier. chromium-headless-shell is the

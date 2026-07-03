@@ -171,19 +171,23 @@ def _file_kind(url: str, content_type: str | None) -> str:
 
 
 async def _document_to_markdown(content: bytes, url: str, kind: str) -> str | None:
-    """Write document bytes to a tempfile and run the upstream extractor
-    (PyMuPDF4LLM / MarkItDown) off-thread."""
+    """Write document bytes to a temp file and run the upstream extractor
+    (PyMuPDF4LLM / MarkItDown) off-thread. The temp file keeps the URL's
+    basename because the extractor uses the filename as the front-matter
+    title (which surfaces in vector-store citations)."""
     host = urlsplit(url).netloc
-    suffix = f".{kind}" if kind != "bin" else ".bin"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    basename = os.path.basename(urlsplit(url).path) or f"document.{kind}"
+    tmpdir = tempfile.mkdtemp(prefix="scrape-mcp-doc-")
+    path = os.path.join(tmpdir, basename)
     try:
-        tmp.write(content)
-        tmp.close()
+        with open(path, "wb") as fh:
+            fh.write(content)
         return await asyncio.to_thread(
-            _extract_document_to_markdown, tmp.name, url, host)
+            _extract_document_to_markdown, path, url, host)
     finally:
         try:
-            os.unlink(tmp.name)
+            os.unlink(path)
+            os.rmdir(tmpdir)
         except OSError:
             pass
 
