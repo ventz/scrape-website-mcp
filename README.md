@@ -2,7 +2,14 @@
 
 A self-hosted **MCP server** that scrapes URLs into clean markdown. Designed to be wired into an OpenAI-Assistants / Responses agent as a remote tool — either through a managing platform (which performs the OpenAI vector-store upload itself), or as a standalone server that uploads into your own vector store with **replace-by-URL semantics**.
 
-Companion to **[github.com/ventz/scrape-website](https://github.com/ventz/scrape-website)** — this project reuses its trafilatura-based text-extraction logic, pulled in at build / setup time so improvements upstream flow through automatically (no manual sync, no copied code).
+Companion to **[github.com/ventz/scrape-website](https://github.com/ventz/scrape-website)** — this server imports upstream's `scrape_website` package (the shared `FetchEngine`) as a real library dependency, so the FULL upstream fetch stack runs here too:
+
+- **JS/SPA rendering** — un-hydrated SPA shells auto-escalate to headless Chromium (`render_mode=auto|always|never`)
+- **WAF/403 fallback** — curl_cffi Chrome-TLS-fingerprint retry for Cloudflare/Imperva/Akamai blocks (+ optional exported-cookie clearance via `SCRAPE_CF_COOKIES`)
+- **PDF/Office → Markdown** — documents found while crawling are extracted with PyMuPDF4LLM / MarkItDown (`extract_docs`, default on)
+- **Robustness** — retry/backoff + `Retry-After`, protego robots.txt + adaptive Crawl-Delay pacing, sitemap-index-aware seeding
+
+Upstream improvements land with `make update-scraper` (which refreshes the pinned checkout and re-locks). No copied fetch code — the engine is one codebase shared with the standalone CLI.
 
 ---
 
@@ -27,12 +34,12 @@ Companion to **[github.com/ventz/scrape-website](https://github.com/ventz/scrape
 
 `ventz/scrape-website` is a standalone CLI crawler — useful on its own for archiving sites to disk. This project is the **MCP-server adapter** that wraps the same extraction logic and exposes it as remote tools that an OpenAI-Assistants / Responses agent can call. Keeping them separate lets the CLI stay lean and lets the MCP server own its own deployment story (Docker, OpenAI-vector-store sync, bearer auth, state DB).
 
-The MCP server **does not vendor** scrape-website. It pulls it in at install time:
+The MCP server **does not copy** scrape-website code. It installs upstream as an editable uv path dependency (`scrape-website[render,waf,docs]`, see `[tool.uv.sources]`):
 
-- **Docker:** `git clone --depth 1 --branch ${SCRAPE_WEBSITE_REF}` runs inside the image build.
-- **Local dev:** `make setup` clones into `vendor/scrape-website/` (which is `.gitignore`d).
+- **Docker:** `git clone --depth 1 --branch ${SCRAPE_WEBSITE_REF}` into `/app/vendor/scrape-website` inside the image build, then `uv sync`.
+- **Local dev:** `make setup` clones into `vendor/scrape-website/` (which is `.gitignore`d) and syncs.
 
-Pin to a tag / SHA with `SCRAPE_WEBSITE_REF=<ref>`. Default is `main`.
+Pin to a tag / SHA with `SCRAPE_WEBSITE_REF=<ref>`. The `human` extra (interactive `--human` challenge solving) is deliberately not installed — that flow needs a workstation with a real Chrome; on a headless server use `SCRAPE_CF_COOKIES` instead.
 
 ---
 
@@ -51,13 +58,13 @@ Both modes are supported by the same tools; the platform just exercises a smalle
 
 | Tool | Used by platform? | Purpose |
 |------|------------------|---------|
-| `fetch_url_as_markdown(url)` | ✓ | Live one-shot scrape, returns markdown + metadata (HTTP status, page title, content bytes, fetch duration). No vector store, no state. |
+| `fetch_url_as_markdown(url, render_mode?)` | ✓ | Live one-shot scrape, returns markdown + metadata (HTTP status, page title, content bytes, fetch duration, plus `rendered`/`via`/`content_kind`). No vector store, no state. |
 | `register_url(url, vector_store_id)` | — | Scrape the URL → upload as markdown into the given vector store, tagged with `source_url`, `content_hash`, `fetched_at` attributes. Idempotent. |
 | `resync_url(url)` | — | Re-scrape. If content hash changed, upload new file, wait for indexing, then delete the old VS file and the underlying File object. |
 | `resync_all()` | — | Run `resync_url` for every registered URL with bounded concurrency. Cron-friendly. |
 | `unregister_url(url)` | — | Remove the URL from the vector store and forget it. |
 | `list_registered()` | — | List everything this server is tracking. |
-| `crawl_site(seed_url, max_pages, max_depth, ...)` | — | BFS crawl from a seed URL (same-FQDN scoped), returning markdown for every page reached. Respects robots.txt, configurable depth/page limits and politeness delay. Supports `exclude_patterns` (regex list filtering images/PDFs/static assets by default), `strip_tracking_params` (dedupes UTM variants), and `use_sitemap` (seeds BFS from `/sitemap.xml`). |
+| `crawl_site(seed_url, max_pages, max_depth, ...)` | ✓ | BFS crawl from a seed URL (same-FQDN scoped), returning markdown for every page reached. Respects robots.txt (protego; `Crawl-Delay` overrides `delay_ms` when declared), configurable depth/page limits and politeness delay. Supports `exclude_patterns` (regex list filtering CMS noise + images/static assets by default — **documents are no longer excluded**), `strip_tracking_params` (dedupes UTM variants), `use_sitemap` (seeds BFS from `/sitemap.xml`, sitemap-index aware), `render_mode` (`auto` renders SPA shells in headless Chromium), and `extract_docs` (default on: PDFs/Office files found while crawling are converted to Markdown; off skips fetching them). Emits MCP progress notifications per page (keep-alive on long crawls). |
 | `server_health()` | — | Cheap status check — DB ok, registered count, last `resync_all` run. |
 
 ---
@@ -73,32 +80,34 @@ cp .env.example .env
 # edit .env: set MCP_BEARER_TOKEN (required); OPENAI_API_KEY is only needed for standalone use
 
 docker build -t scrape-website-mcp .
-docker run --rm -p 8000:8000 --env-file .env -v $(pwd)/data:/app/data scrape-website-mcp
+docker run --rm -p 8000:8000 --shm-size=1g --env-file .env -v $(pwd)/data:/app/data scrape-website-mcp
 ```
+
+> **Image size:** the image ships headless Chromium (`chromium-headless-shell`) for JS rendering plus the PDF/Office extraction stack — expect **~1.1–1.5 GB**. `--shm-size=1g` gives Chromium headroom (the default launch args already include `--disable-dev-shm-usage --no-sandbox` via `SCRAPER_IN_DOCKER=1`).
 
 Build options:
 
 ```bash
-# Track upstream HEAD
+# Track a branch
 docker build --build-arg SCRAPE_WEBSITE_REF=main -t scrape-website-mcp .
 
 # Pin to a tag or commit SHA
-docker build --build-arg SCRAPE_WEBSITE_REF=v0.2.0 -t scrape-website-mcp .
+docker build --build-arg SCRAPE_WEBSITE_REF=v0.5.0 -t scrape-website-mcp .
 ```
 
 ### Local dev
 
 ```bash
-make setup                                   # clones ventz/scrape-website into vendor/, runs uv sync
+make setup                                   # clones ventz/scrape-website into vendor/, uv sync, installs Chromium
 cp .env.example .env                         # then edit
 make run                                     # starts uvicorn on :8000 (sources .env first)
 ```
 
-Refresh upstream scrape-website:
+Refresh upstream scrape-website (this is how upstream improvements land):
 
 ```bash
-make update-scraper                          # tracks $SCRAPE_WEBSITE_REF (default: main)
-make update-scraper SCRAPE_WEBSITE_REF=v0.2.0
+make update-scraper                          # tracks $SCRAPE_WEBSITE_REF
+make update-scraper SCRAPE_WEBSITE_REF=v0.5.0
 ```
 
 Run tests:
@@ -208,9 +217,15 @@ All settings come from environment variables. `make run` and `docker run --env-f
 | `MCP_BEARER_TOKEN` | **yes** | — | Bearer token clients must present. Generate with `openssl rand -hex 32`. |
 | `OPENAI_API_KEY` | only for standalone use of OpenAI-side tools | — | Project-scoped key with `files:write` + `vector_stores:write`. **Not needed** in platform-driven mode. |
 | `STATE_DIR` | no | `./data` | Where the SQLite state file lives. |
-| `SCRAPE_WEBSITE_REF` | no | `main` | Git ref of `ventz/scrape-website` to pull in. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. |
-| `SCRAPER_USER_AGENT` | no | `scrape-website-mcp/0.1 (+...)` | User-Agent used for outbound HTTP fetches. |
+| `SCRAPE_WEBSITE_REF` | no | (branch pin) | Git ref of `ventz/scrape-website` to pull in. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. |
+| `SCRAPER_USER_AGENT` | no | upstream Chrome UA | User-Agent for outbound fetches. **0.2.0 policy change:** the default is now a real-Chrome UA (was an honest `scrape-website-mcp/0.1` bot UA) because the WAF-clearance tier replays cookies bound to a Chrome UA. Set this to restore the honest bot UA if you don't need WAF handling. |
 | `SCRAPER_TIMEOUT` | no | `30` | Per-request timeout (seconds). |
+| `SCRAPER_RENDER_MODE` | no | `auto` | Server-wide default for JS rendering: `auto` \| `always` \| `never`. Per-call `render_mode` overrides. |
+| `SCRAPER_EXTRACT_DOCS` | no | `1` | Server-wide default for PDF/Office → Markdown extraction. Per-call `extract_docs` overrides. |
+| `SCRAPER_MAX_FILE_SIZE` | no | `52428800` (50 MB) | Documents larger than this are not extracted (`status="failed"`). |
+| `SCRAPER_BROWSER_ARGS` | no | (see notes) | Extra Chromium launch args (space-separated). Unset + `SCRAPER_IN_DOCKER=1` → `--disable-dev-shm-usage --no-sandbox`. |
+| `SCRAPER_IN_DOCKER` | no | set in image | Enables the container-safe Chromium launch args above. |
+| `SCRAPE_CF_COOKIES` | no | — | Path to an exported cookies file (JSON or Netscape) for WAF/Cloudflare clearance replay — the only headless-server-safe clearance source (`--human` is CLI/workstation-only). |
 | `LOG_LEVEL` | no | `INFO` | Standard Python logging level. |
 
 ---

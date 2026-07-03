@@ -20,7 +20,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from openai import AsyncOpenAI
 
 from mcp_server import auth, crawler, openai_sync, scraper
@@ -303,10 +303,15 @@ async def list_registered() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def fetch_url_as_markdown(url: str) -> dict[str, Any]:
-    """Live one-shot scrape — no vector store, no state. Returns markdown."""
+async def fetch_url_as_markdown(
+    url: str, render_mode: str | None = None
+) -> dict[str, Any]:
+    """Live one-shot scrape — no vector store, no state. Returns markdown.
+
+    render_mode: 'auto' (default; headless-render only un-hydrated SPA
+    shells), 'always', or 'never'."""
     url = scraper.normalize_url(url)
-    fetched = await scraper.fetch_and_extract(url)
+    fetched = await scraper.fetch_and_extract(url, render_mode=render_mode)
     return {
         "url": url,
         "markdown": fetched.markdown,
@@ -315,6 +320,10 @@ async def fetch_url_as_markdown(url: str) -> dict[str, Any]:
         "page_title": fetched.page_title,
         "status": fetched.status,
         "error": fetched.error,
+        # Additive (0.2.0):
+        "rendered": fetched.rendered,
+        "via": fetched.via,
+        "content_kind": fetched.content_kind,
     }
 
 
@@ -352,16 +361,31 @@ async def crawl_site(
     exclude_patterns: list[str] | None = None,
     strip_tracking_params: bool = True,
     use_sitemap: bool = True,
+    render_mode: str | None = None,
+    extract_docs: bool | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """BFS crawl from seed_url, returning markdown for every page reached.
 
     Scope: same FQDN by default (include_subdomains=True relaxes to eTLD+1).
     Limits: max_pages caps total fetches; max_depth caps BFS depth.
-    Politeness: delay_ms between requests; robots.txt respected by default.
-    Filtering: exclude_patterns (list of regex strings, defaults to images/PDFs/
-    static assets) drops matching URLs; strip_tracking_params removes UTM-style
-    query params before dedup; use_sitemap seeds BFS from /sitemap.xml.
+    Politeness: delay_ms between requests (robots.txt Crawl-Delay overrides
+    when declared); robots.txt respected by default.
+    Filtering: exclude_patterns (list of regex strings, defaults to CMS noise +
+    images/static assets — NOT documents) drops matching URLs;
+    strip_tracking_params removes UTM-style query params before dedup;
+    use_sitemap seeds BFS from /sitemap.xml (sitemap-index aware).
+    Rendering: render_mode 'auto' (default) headless-renders only un-hydrated
+    SPA shells; 'always'/'never' force it.
+    Documents: extract_docs (default true) downloads PDFs/Office files found
+    during the crawl and converts them to Markdown; false skips fetching them.
     """
+    async def _progress(fetched: int, queued: int) -> None:
+        # Doubles as a keep-alive on the Streamable-HTTP stream during
+        # multi-minute crawls (the platform holds this call open).
+        if ctx is not None:
+            await ctx.report_progress(progress=fetched, total=None)
+
     return await crawler.crawl(
         seed_url,
         max_pages=max_pages,
@@ -372,6 +396,9 @@ async def crawl_site(
         exclude_patterns=exclude_patterns,
         strip_tracking_params=strip_tracking_params,
         use_sitemap=use_sitemap,
+        render_mode=render_mode,
+        extract_docs=extract_docs,
+        progress_cb=_progress,
     )
 
 

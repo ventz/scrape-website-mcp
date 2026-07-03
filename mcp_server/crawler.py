@@ -1,8 +1,16 @@
 """BFS site crawler scoped to the same FQDN (or eTLD+1).
 
 The main entry point is `crawl()`, which returns a dict matching the
-`crawl_site` MCP tool's return shape.  Uses aiohttp for fetching and
-lxml for link extraction.  Respects robots.txt via stdlib robotparser.
+`crawl_site` MCP tool's return shape. Fetching goes through the shared
+``scrape_website.FetchEngine`` (one fresh engine per crawl — robots and
+Crawl-Delay state are per-host), which brings the full upstream tier stack:
+retry/backoff + Retry-After, curl_cffi WAF/403 fallback, headless-Chromium
+SPA render escalation, protego robots.txt, and PDF/Office -> Markdown
+document extraction.
+
+The crawl is deliberately SEQUENTIAL (BFS + politeness delay): the platform
+parallelizes vector-store uploads on its side; a polite single-flight crawl
+keeps us deterministic and friendly to the target host.
 """
 
 from __future__ import annotations
@@ -10,95 +18,35 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
-import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qs, urlencode
-from urllib.robotparser import RobotFileParser
+from urllib.parse import urlsplit, urlunsplit
 
-import aiohttp
 import lxml.html
 
-from mcp_server.scraper import (
-    FetchResult,
-    _DEFAULT_UA,
-    _TIMEOUT,
-    _decode_body,
-    _extract_title,
-    html_to_markdown,
+from scrape_website.config import (
+    DOWNLOADABLE_EXTENSIONS,
+    _DEFAULT_EXCLUDE_PATTERNS as _UPSTREAM_EXCLUDE_PATTERNS,
 )
+from scrape_website.sitemap import _fetch_sitemap_urls
+from scrape_website.urls import _strip_tracking_params
+
+from mcp_server import scraper
+from mcp_server.scraper import FetchResult, html_to_markdown
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Upstream helpers — imported from ventz/scrape-website when available,
-# otherwise small local fallbacks (≤10 lines each).
-# ---------------------------------------------------------------------------
-
-try:
-    from app import (  # type: ignore[import-untyped]
-        _DEFAULT_EXCLUDE_PATTERNS,
-        _DEFAULT_TRACKING_PARAMS,
-        _strip_tracking_params,
-        _url_excluded,
-        _fetch_sitemap_urls,
-    )
-except ImportError:
-    # TODO: remove fallbacks once ventz/scrape-website ships these symbols
-    # (upstream module path: vendor/scrape-website/app.py)
-
-    _DEFAULT_EXCLUDE_PATTERNS: list[str] = [  # type: ignore[no-redef]
-        r"\.(jpg|jpeg|png|gif|svg|webp|ico|bmp|tiff?)$",
-        r"\.(pdf|docx?|xlsx?|pptx?|zip|tar|gz|rar)$",
-        r"\.(css|js|json|xml|woff2?|ttf|eot)$",
-        r"[?&](action=edit|oldid=|diff=)",
-    ]
-
-    _DEFAULT_TRACKING_PARAMS: frozenset[str] = frozenset({  # type: ignore[no-redef]
-        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-        "fbclid", "gclid", "mc_cid", "mc_eid",
-    })
-
-    def _strip_tracking_params(url: str, tracking_params: frozenset[str] | None = None) -> str:  # type: ignore[misc]
-        """Remove known tracking query params from *url*."""
-        params = tracking_params or _DEFAULT_TRACKING_PARAMS
-        parts = urlsplit(url)
-        qs = parse_qs(parts.query, keep_blank_values=True)
-        cleaned = {k: v for k, v in qs.items() if k.lower() not in params}
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(cleaned, doseq=True), ""))
-
-    def _url_excluded(url: str, patterns: list[str]) -> bool:  # type: ignore[misc]
-        """Return True if *url* matches any of *patterns* (regex list)."""
-        for pat in patterns:
-            if re.search(pat, url, re.IGNORECASE):
-                return True
-        return False
-
-    def _fetch_sitemap_urls(host: str, scheme: str = "https", timeout: int = 10, max_urls: int = 5000) -> list[str]:  # type: ignore[misc]
-        """Synchronous sitemap fetch (called from async context via to_thread)."""
-        import urllib.request
-        sitemap_url = f"{scheme}://{host}/sitemap.xml"
-        try:
-            req = urllib.request.Request(sitemap_url, headers={"User-Agent": _DEFAULT_UA})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read().decode("utf-8", errors="replace")
-        except Exception:
-            return []
-        urls: list[str] = []
-        try:
-            root = ET.fromstring(data)
-            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-            for loc in root.findall(".//sm:loc", ns):
-                if loc.text:
-                    urls.append(loc.text.strip())
-                    if len(urls) >= max_urls:
-                        break
-        except ET.ParseError:
-            pass
-        return urls
-
+# Default URL excludes for MCP crawls: upstream's CMS-noise patterns (/tag/,
+# /author/, feeds, pagination, ...) plus static-asset extensions. NOTE the
+# 0.2.0 behavior change: documents (.pdf/.docx/...) are NO LONGER excluded —
+# they are fetched and extracted to Markdown (disable with extract_docs=false).
+_DEFAULT_EXCLUDE_PATTERNS: list[str] = [
+    *_UPSTREAM_EXCLUDE_PATTERNS,
+    r"\.(jpg|jpeg|png|gif|svg|webp|ico|bmp|tiff?)$",
+    r"\.(css|js|json|xml|woff2?|ttf|eot)$",
+    r"[?&](action=edit|oldid=|diff=)",
+]
 
 # Schemes we will follow.
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
@@ -154,6 +102,12 @@ def _is_in_scope(candidate_url: str, scope_host: str, include_subdomains: bool) 
     return False
 
 
+def _is_document_url(url: str) -> bool:
+    """Cheap extension check: would this URL be fetched as a document?"""
+    path = urlsplit(url).path.lower()
+    return any(path.endswith(ext) for ext in DOWNLOADABLE_EXTENSIONS)
+
+
 # ---------------------------------------------------------------------------
 # Link extraction from raw HTML
 # ---------------------------------------------------------------------------
@@ -183,69 +137,6 @@ def extract_links(html: str, page_url: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# robots.txt
-# ---------------------------------------------------------------------------
-
-async def _fetch_robots(session: aiohttp.ClientSession, seed_url: str) -> RobotFileParser:
-    """Fetch and parse robots.txt for the seed URL's origin."""
-    parts = urlsplit(seed_url)
-    robots_url = f"{parts.scheme}://{parts.netloc}/robots.txt"
-    rp = RobotFileParser()
-    rp.set_url(robots_url)
-    try:
-        async with session.get(robots_url, allow_redirects=True) as resp:
-            if resp.status == 200:
-                text = await _decode_body(resp)
-                rp.parse(text.splitlines())
-            else:
-                # No robots.txt or error -> allow everything
-                rp.parse([])
-    except Exception:
-        rp.parse([])
-    return rp
-
-
-# ---------------------------------------------------------------------------
-# Single-page fetch (raw HTML + markdown in one shot)
-# ---------------------------------------------------------------------------
-
-async def _fetch_page(
-    session: aiohttp.ClientSession, url: str
-) -> tuple[FetchResult, str]:
-    """Fetch a page, return (FetchResult with markdown, raw_html).
-
-    raw_html is needed for link extraction; FetchResult carries
-    the markdown + diagnostics.
-    """
-    started = time.perf_counter()
-    result = FetchResult(url=url)
-    raw_html = ""
-    try:
-        async with session.get(url, allow_redirects=True) as resp:
-            result.http_status = resp.status
-            result.etag = resp.headers.get("ETag")
-            result.last_modified = resp.headers.get("Last-Modified")
-            if resp.status >= 400:
-                result.status = "failed"
-                result.error = f"HTTP {resp.status}"
-                return result, raw_html
-            raw_html = await _decode_body(resp)
-    except Exception as e:  # noqa: BLE001
-        result.error = f"{type(e).__name__}: {e}"[:240]
-        result.status = "failed"
-        return result, raw_html
-    finally:
-        result.fetch_duration_ms = int((time.perf_counter() - started) * 1000)
-
-    result.content_bytes = len(raw_html.encode("utf-8", errors="replace"))
-    result.page_title = _extract_title(raw_html)
-    result.markdown = html_to_markdown(raw_html, url)
-    if not result.markdown.strip():
-        result.status = "empty"
-    return result, raw_html
-
-
-# ---------------------------------------------------------------------------
 # Main BFS crawl
 # ---------------------------------------------------------------------------
 
@@ -262,6 +153,10 @@ def _page_dict(fr: FetchResult, depth: int) -> dict[str, Any]:
         "etag": fr.etag,
         "last_modified": fr.last_modified,
         "error": fr.error,
+        # Additive (0.2.0):
+        "rendered": fr.rendered,
+        "via": fr.via,
+        "content_kind": fr.content_kind,
     }
 
 
@@ -276,21 +171,35 @@ async def crawl(
     exclude_patterns: list[str] | None = None,
     strip_tracking_params: bool = True,
     use_sitemap: bool = True,
+    render_mode: str | None = None,
+    extract_docs: bool | None = None,
+    progress_cb=None,
 ) -> dict[str, Any]:
     """BFS crawl from *seed_url*.
 
     Returns the dict shape expected by the ``crawl_site`` MCP tool.
 
     *exclude_patterns*: list of regex strings; URLs matching any pattern are
-    skipped.  Defaults to ``_DEFAULT_EXCLUDE_PATTERNS`` (images, PDFs, static
-    assets).
+    skipped.  Defaults to ``_DEFAULT_EXCLUDE_PATTERNS`` (CMS noise, images,
+    static assets — NOT documents).
 
     *strip_tracking_params*: when True, UTM and similar tracking query params
     are stripped from discovered URLs before dedup, preventing duplicates that
     differ only by tracking tags.
 
-    *use_sitemap*: when True, ``/sitemap.xml`` is fetched before BFS begins
-    and its URLs are seeded into the queue at depth 0.
+    *use_sitemap*: when True, ``/sitemap.xml`` (including sitemap-index
+    recursion) is fetched before BFS begins and its URLs are seeded at depth 0.
+
+    *render_mode*: 'auto' (default) renders only pages that look like
+    un-hydrated SPA shells in headless Chromium; 'always'/'never' force it.
+
+    *extract_docs*: when True (default), PDF/Office documents encountered
+    during the crawl are downloaded and converted to Markdown; when False,
+    document URLs are not fetched at all.
+
+    *progress_cb*: optional async callable ``(fetched, queued)`` invoked after
+    every page — the MCP layer uses it for progress notifications that double
+    as keep-alives on long crawls.
     """
     seed_url = _normalize_crawl_url(seed_url)
     if strip_tracking_params:
@@ -298,6 +207,7 @@ async def crawl(
         seed_url = _normalize_crawl_url(seed_url)
     host = _scope_host(seed_url)
     started_at = datetime.now(timezone.utc).isoformat()
+    do_docs = extract_docs if extract_docs is not None else scraper.extract_docs_default()
 
     # Compile exclude patterns once.
     effective_patterns = exclude_patterns if exclude_patterns is not None else list(_DEFAULT_EXCLUDE_PATTERNS)
@@ -311,6 +221,9 @@ async def crawl(
     skipped_offsite = 0
     skipped_max_pages = 0
     skipped_excluded = 0
+    skipped_documents = 0
+    rendered_count = 0
+    docs_extracted = 0
 
     # BFS state
     queue: deque[tuple[str, int]] = deque()
@@ -321,7 +234,8 @@ async def crawl(
 
     delay_s = delay_ms / 1000.0
 
-    # Pre-seed from sitemap if requested.
+    # Pre-seed from sitemap if requested (upstream helper: recurses into
+    # sitemap-index files).
     if use_sitemap:
         try:
             sitemap_urls = await asyncio.to_thread(
@@ -343,15 +257,22 @@ async def crawl(
             if _is_excluded(norm):
                 skipped_excluded += 1
                 continue
+            if not do_docs and _is_document_url(norm):
+                skipped_documents += 1
+                continue
             queue.append((norm, 0))
 
-    async with aiohttp.ClientSession(
-        timeout=_TIMEOUT, headers={"User-Agent": _DEFAULT_UA}
-    ) as session:
-        # Fetch robots.txt once for the run.
-        rp: RobotFileParser | None = None
+    # One fresh engine per crawl: robots + Crawl-Delay state are per-host.
+    # wait_politeness() paces to robots.txt Crawl-Delay when declared, else
+    # to delay_ms.
+    engine = scraper.build_engine(
+        respect_robots=respect_robots,
+        delay_between_requests=delay_s,
+    )
+    await engine.start()
+    try:
         if respect_robots:
-            rp = await _fetch_robots(session, seed_url)
+            await engine.load_robots(seed_url)
 
         while queue and len(pages) < max_pages:
             url, depth = queue.popleft()
@@ -360,20 +281,37 @@ async def crawl(
                 # Already past max depth; don't fetch, don't enqueue children.
                 continue
 
-            # robots.txt check
-            if rp and not rp.can_fetch(_DEFAULT_UA, url):
+            # robots.txt check (protego, same parser the upstream CLI uses)
+            if not engine.robots_allows(url):
                 skipped_robots += 1
                 continue
 
-            # Fetch
-            fr, raw_html = await _fetch_page(session, url)
+            # Fetch through the shared tier stack; links come from the FINAL
+            # (possibly rendered) HTML via our scope-aware extractor.
+            async def _run_extract(html: str, page_url: str):
+                links = extract_links(html, page_url)
+                markdown = await asyncio.to_thread(html_to_markdown, html, page_url)
+                return links, markdown
+
+            fr, child_links = await scraper.fetch_page_result(
+                url, run_extract=_run_extract, render_mode=render_mode,
+                extract_docs=do_docs, engine=engine)
             pages.append(_page_dict(fr, depth))
+            if fr.rendered:
+                rendered_count += 1
+            if fr.content_kind != "html" and fr.status == "ok":
+                docs_extracted += 1
             if depth > max_depth_reached:
                 max_depth_reached = depth
 
-            # Extract and enqueue child links (only if we got HTML)
-            if raw_html and depth < max_depth:
-                child_links = extract_links(raw_html, url)
+            if progress_cb is not None:
+                try:
+                    await progress_cb(len(pages), len(queue))
+                except Exception:  # noqa: BLE001
+                    pass  # progress must never kill a crawl
+
+            # Enqueue child links (only if the page produced any)
+            if child_links and depth < max_depth:
                 for link in sorted(child_links):  # sorted for determinism
                     norm_link = link
                     if strip_tracking_params:
@@ -388,15 +326,20 @@ async def crawl(
                     if _is_excluded(norm_link):
                         skipped_excluded += 1
                         continue
+                    if not do_docs and _is_document_url(norm_link):
+                        skipped_documents += 1
+                        continue
                     if len(pages) + (len(queue)) >= max_pages:
                         # Queue already full enough; remaining new links are skipped.
                         skipped_max_pages += 1
                         continue
                     queue.append((norm_link, depth + 1))
 
-            # Politeness delay
-            if queue and delay_s > 0:
-                await asyncio.sleep(delay_s)
+            # Politeness: robots Crawl-Delay when declared, else delay_ms.
+            if queue:
+                await engine.wait_politeness()
+    finally:
+        await engine.close()
 
     finished_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -408,7 +351,10 @@ async def crawl(
         "skipped_offsite": skipped_offsite,
         "skipped_max_pages": skipped_max_pages,
         "skipped_excluded": skipped_excluded,
+        "skipped_documents": skipped_documents,
         "max_depth_reached": max_depth_reached,
+        "rendered_count": rendered_count,
+        "docs_extracted": docs_extracted,
         "started_at": started_at,
         "finished_at": finished_at,
         "pages": pages,
