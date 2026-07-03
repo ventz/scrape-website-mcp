@@ -44,7 +44,7 @@ make clean            # Remove vendor/, data/, caches
 | `MCP_BEARER_TOKEN` | Yes | Auth token for incoming MCP requests |
 | `OPENAI_API_KEY` | No* | Needed only for register/resync/unregister tools |
 | `STATE_DIR` | No | SQLite data dir (default: `./data`) |
-| `SCRAPE_WEBSITE_REF` | No | Git ref of the vendored engine (branch pin; move to a tag after upstream release) |
+| `SCRAPE_WEBSITE_REF` | No | Git ref of the vendored engine (default `main`; pin a tag for reproducible builds) |
 | `SCRAPER_USER_AGENT` | No | Outbound UA. **Default is upstream's Chrome UA** (0.2.0 policy change — WAF cookie replay is UA-bound); set explicitly to restore an honest bot UA |
 | `SCRAPER_TIMEOUT` | No | Per-request timeout, seconds (default 30) |
 | `SCRAPER_RENDER_MODE` | No | `auto` (default) / `always` / `never`; per-call `render_mode` overrides |

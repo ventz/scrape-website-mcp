@@ -1,6 +1,6 @@
 # Pin of ventz/scrape-website (branch or tag). The engine is installed as an
 # editable uv path dependency from $(VENDOR_DIR) — see [tool.uv.sources].
-SCRAPE_WEBSITE_REF ?= feat/mcp-web-scraper
+SCRAPE_WEBSITE_REF ?= main
 SCRAPE_WEBSITE_REPO ?= https://github.com/ventz/scrape-website.git
 VENDOR_DIR := vendor/scrape-website
 

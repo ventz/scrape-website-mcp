@@ -217,7 +217,7 @@ All settings come from environment variables. `make run` and `docker run --env-f
 | `MCP_BEARER_TOKEN` | **yes** | — | Bearer token clients must present. Generate with `openssl rand -hex 32`. |
 | `OPENAI_API_KEY` | only for standalone use of OpenAI-side tools | — | Project-scoped key with `files:write` + `vector_stores:write`. **Not needed** in platform-driven mode. |
 | `STATE_DIR` | no | `./data` | Where the SQLite state file lives. |
-| `SCRAPE_WEBSITE_REF` | no | (branch pin) | Git ref of `ventz/scrape-website` to pull in. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. |
+| `SCRAPE_WEBSITE_REF` | no | `main` | Git ref of `ventz/scrape-website` to pull in. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. |
 | `SCRAPER_USER_AGENT` | no | upstream Chrome UA | User-Agent for outbound fetches. **0.2.0 policy change:** the default is now a real-Chrome UA (was an honest `scrape-website-mcp/0.1` bot UA) because the WAF-clearance tier replays cookies bound to a Chrome UA. Set this to restore the honest bot UA if you don't need WAF handling. |
 | `SCRAPER_TIMEOUT` | no | `30` | Per-request timeout (seconds). |
 | `SCRAPER_RENDER_MODE` | no | `auto` | Server-wide default for JS rendering: `auto` \| `always` \| `never`. Per-call `render_mode` overrides. |

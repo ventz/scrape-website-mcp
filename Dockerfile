@@ -3,7 +3,7 @@ FROM python:3.13-slim
 # Pin of ventz/scrape-website (branch or tag) — the shared fetch/crawl engine,
 # installed as an editable uv path dependency from vendor/ (see
 # [tool.uv.sources] in pyproject.toml).
-ARG SCRAPE_WEBSITE_REF=feat/mcp-web-scraper
+ARG SCRAPE_WEBSITE_REF=main
 ARG SCRAPE_WEBSITE_REPO=https://github.com/ventz/scrape-website.git
 
 RUN apt-get update \
