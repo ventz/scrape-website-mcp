@@ -1,0 +1,10 @@
+.git
+.venv
+data
+__pycache__
+**/__pycache__
+mcp_server/tests
+.env
+vendor/scrape-website/.venv
+vendor/scrape-website/data
+vendor/scrape-website/__pycache__

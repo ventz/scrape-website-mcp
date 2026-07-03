@@ -1,17 +1,22 @@
+# Pin of ventz/scrape-website (branch or tag). The engine is installed as an
+# editable uv path dependency from $(VENDOR_DIR) — see [tool.uv.sources].
 SCRAPE_WEBSITE_REF ?= main
+SCRAPE_WEBSITE_REPO ?= https://github.com/ventz/scrape-website.git
 VENDOR_DIR := vendor/scrape-website
 
 .PHONY: setup update-scraper run test docker-build docker-run lint clean
 
 setup:
 	@if [ ! -d $(VENDOR_DIR)/.git ]; then \
-		echo "Cloning ventz/scrape-website@$(SCRAPE_WEBSITE_REF) into $(VENDOR_DIR)"; \
+		echo "Cloning scrape-website@$(SCRAPE_WEBSITE_REF) into $(VENDOR_DIR)"; \
 		git clone --depth 1 --branch $(SCRAPE_WEBSITE_REF) \
-			https://github.com/ventz/scrape-website.git $(VENDOR_DIR); \
+			$(SCRAPE_WEBSITE_REPO) $(VENDOR_DIR); \
 	else \
 		echo "$(VENDOR_DIR) already present; run 'make update-scraper' to refresh."; \
 	fi
 	uv sync
+	@# Chromium for the JS-render escalation tier (headless shell = smaller).
+	uv run playwright install chromium-headless-shell
 
 update-scraper:
 	@if [ ! -d $(VENDOR_DIR)/.git ]; then \
@@ -25,8 +30,10 @@ update-scraper:
 	@# a "leaving N commits behind" warning every time upstream advances
 	@# (the shallow clone can't see the parent chain so git thinks the
 	@# old tip is unreferenced). `reset --hard` produces the same working
-	@# tree quietly. Either way the vendored CLI is read-only — we never
+	@# tree quietly. Either way the vendored engine is read-only — we never
 	@# branch / commit / push from here.
+	uv lock -P scrape-website
+	uv sync
 
 run:
 	@# Load .env when present so users don't have to `source` it manually.
@@ -50,7 +57,10 @@ docker-build:
 	docker build --build-arg SCRAPE_WEBSITE_REF=$(SCRAPE_WEBSITE_REF) -t scrape-website-mcp .
 
 docker-run:
+	@# --shm-size: Chromium is happier with real /dev/shm even though the
+	@# default launch args include --disable-dev-shm-usage.
 	docker run --rm -p 8000:8000 \
+		--shm-size=1g \
 		--env-file .env \
 		-v $$(pwd)/data:/app/data \
 		scrape-website-mcp

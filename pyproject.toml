@@ -1,6 +1,6 @@
 [project]
 name = "scrape-website-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hosted MCP server that scrapes URLs into an OpenAI vector store with replace-by-URL semantics. Companion to ventz/scrape-website."
 readme = "README.md"
 license = { text = "MIT" }
@@ -10,12 +10,19 @@ dependencies = [
     "fastmcp>=2.0",
     "openai>=1.50",
     "aiohttp>=3.11",
-    "aiofiles>=24.1",       # upstream scrape-website app.py imports this at module load
-    "aiodns>=3.2",          # likewise
-    "trafilatura>=2.0",
-    "lxml>=5.3",
     "uvicorn[standard]>=0.30",
+    # The shared fetch/crawl/extract engine. Extras: headless-Chromium render
+    # escalation (render), curl_cffi WAF/403 fallback (waf), PDF/Office ->
+    # Markdown (docs). The `human` extra is deliberately NOT installed — the
+    # interactive solve flow is workstation-only.
+    "scrape-website[render,waf,docs]>=0.5.0",
 ]
+
+[tool.uv.sources]
+# `make setup` clones ventz/scrape-website into vendor/ (pin via
+# SCRAPE_WEBSITE_REF) and uv installs it as an editable package —
+# `make update-scraper` pulls upstream improvements through.
+scrape-website = { path = "vendor/scrape-website", editable = true }
 
 [dependency-groups]
 dev = [
@@ -31,3 +38,6 @@ package = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["mcp_server/tests"]
+markers = [
+    "integration: end-to-end tests that need Chromium or the network",
+]
