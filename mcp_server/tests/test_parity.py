@@ -730,6 +730,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 '.catch(() => { document.getElementById("root").innerHTML ='
                 ' "<h1>Blocked</h1><p>" + "nothing to see here. ".repeat(30) + "</p>"; });'
                 '</script></body></html>'))
+        elif self.path in ("/fetch-hop", "/fetch-chain", "/fetch-ok"):
+            # Page JS reads a same-origin URL that redirects: straight to the
+            # internal host, via an allowed hop first, or (control) to an
+            # allowed URL.
+            target = {"/fetch-hop": "/hop-internal", "/fetch-chain": "/hop-chain",
+                      "/fetch-ok": "/hop-ok"}[self.path]
+            self._send(200, _render_probe_page(
+                f'fetch("{target}").then(r => r.text())'))
+        elif self.path == "/hop-internal":
+            self._redirect(f"http://localhost:{port}/secret")
+        elif self.path == "/hop-chain":
+            self._redirect(f"http://127.0.0.1:{port}/hop-internal")
+        elif self.path == "/hop-ok":
+            self._redirect(f"http://127.0.0.1:{port}/secret")
+        elif self.path == "/sw.js":
+            self._send(200, (
+                "self.addEventListener('install', e => self.skipWaiting());"
+                "self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));"
+                "self.addEventListener('message', async e => {"
+                " let t = 'SW-FAILED';"
+                " try { t = await (await fetch(e.data)).text(); } catch (err) {}"
+                " e.source.postMessage(t); });"), ctype="application/javascript")
+        elif self.path == "/sw-exfil":
+            self._send(200, _render_probe_page(
+                'navigator.serviceWorker.register("/sw.js")'
+                '.then(() => navigator.serviceWorker.ready)'
+                '.then(reg => new Promise(resolve => {'
+                ' navigator.serviceWorker.onmessage = e => resolve(e.data);'
+                f' reg.active.postMessage("http://localhost:{port}/secret"); }}))'))
         elif self.path == "/guidance":
             body = _minimal_docx("Docx served without an extension")
             self.send_response(200)
@@ -760,6 +789,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+
+def _render_probe_page(promise_js: str) -> str:
+    """Page whose JS writes the resolved text of *promise_js* (or 'Blocked')
+    into the DOM, padded so it extracts as content."""
+    return (
+        '<html><head><title>X</title></head><body><div id="root"></div><script>'
+        'const show = (h, t) => { document.getElementById("root").innerHTML ='
+        ' "<h1>" + h + "</h1><p>" + (t + " ").repeat(30) + "</p>"; };'
+        + promise_js + '.then(t => show("Read", t))'
+        '.catch(() => show("Blocked", "nothing to see here."));'
+        '</script></body></html>')
 
 
 @pytest.fixture
@@ -894,3 +935,25 @@ class TestGuardedEngineIntegration:
             await eng.close()
         assert html and "INTERNAL-SECRET-TOKEN" not in html
         assert "Blocked" in html
+
+    @pytest.mark.skipif(not _chromium_available(), reason="Chromium not installed")
+    @pytest.mark.parametrize("path", ["/fetch-hop", "/fetch-chain", "/sw-exfil"])
+    async def test_render_redirect_and_service_worker_cannot_reach_internal(
+            self, fixture_server, path):
+        # page.route never sees redirect hops or service-worker requests;
+        # the guard has to cover both.
+        eng = _engine()
+        try:
+            html = await eng.render(f"{fixture_server}{path}")
+        finally:
+            await eng.close()
+        assert html and "INTERNAL-SECRET-TOKEN" not in html
+
+    @pytest.mark.skipif(not _chromium_available(), reason="Chromium not installed")
+    async def test_render_allowed_fetch_redirect_still_works(self, fixture_server):
+        eng = _engine()
+        try:
+            html = await eng.render(f"{fixture_server}/fetch-ok")
+        finally:
+            await eng.close()
+        assert html and "<h1>Read</h1>" in html and "INTERNAL-SECRET-TOKEN" in html

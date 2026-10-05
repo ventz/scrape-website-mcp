@@ -17,16 +17,20 @@ as Markdown. This module blocks those targets at every layer the engine uses:
   checked, and pinned with ``CURLOPT_RESOLVE`` so curl connects to the IP
   that was checked.
 - **Headless Chromium:** a ``page.route`` handler aborts any request (the
-  navigation and every subresource/XHR) whose host is blocked, and the final
-  page URL is re-checked before the DOM is returned.
+  navigation and every subresource/XHR) whose host is blocked; fetch()/XHR
+  redirects are followed hop-by-hop under the same check; WebSockets get
+  their own route check; service workers are blocked (their requests never
+  reach ``page.route``); the final page URL is re-checked before the DOM is
+  returned.
 - **Sitemap fetches** (stdlib ``urllib`` inside upstream): ``urlopen`` is
   wrapped so the root sitemap and every redirect hop are checked.
 
 Residual risk, documented rather than hidden: Chromium resolves DNS itself, so
 a rebinding answer that flips between our check and Chromium's lookup is not
-caught for rendered subresources; redirects inside the browser are followed
-by Chromium without re-routing (cross-origin reads are still CORS-blocked, and
-the final URL is re-checked). The urllib sitemap path has the same
+caught for rendered subresources; redirects of non-fetch subresources
+(scripts, stylesheets, frames) and of the main navigation are followed by
+Chromium without re-routing (those bodies aren't readable cross-origin, and
+the final page URL is re-checked). The urllib sitemap path has the same
 check-then-connect window. Sitemap and robots responses are never returned to
 the caller verbatim.
 
@@ -355,8 +359,46 @@ class GuardedFetchEngine(FetchEngine):
             literal = _literal_ip(host)
             ips = [str(literal)] if literal is not None else await resolve(host, port)
             verdict = any(self._is_blocked(ip) for ip in ips)
-            self._host_verdicts[key] = verdict
+            if ips:  # a failed lookup isn't a verdict; re-check next time
+                self._host_verdicts[key] = verdict
         return verdict
+
+    async def _fetch_checked(self, route, page) -> None:
+        """Answer a page fetch()/XHR by following its redirects here, one
+        checked hop at a time. Chromium follows redirects without calling
+        ``page.route`` again (and a fulfilled 3xx's next hop isn't routed
+        either), so letting the browser follow them would let page JS reach
+        an internal host behind a same-origin redirect."""
+        req = route.request
+        hop, method = req.url, req.method
+        try:
+            resp = await route.fetch(max_redirects=0, timeout=self.timeout * 1000)
+            for _ in range(_MAX_REDIRECTS):
+                location = resp.headers.get("location")
+                if resp.status not in (301, 302, 303, 307, 308) or not location:
+                    await route.fulfill(response=resp)
+                    return
+                hop = urljoin(hop, location)
+                if await self.host_blocked(hop):
+                    self.logger.info("render: blocked redirect hop to %s", hop)
+                    await route.abort("blockedbyclient")
+                    return
+                if resp.status == 303 or (resp.status in (301, 302) and method == "POST"):
+                    method = "GET"
+                # context.request, not route.fetch(url=): the latter can't
+                # change scheme (http -> https hops).
+                resp = await page.context.request.fetch(
+                    hop, method=method, headers=req.headers,
+                    data=req.post_data_buffer if method != "GET" else None,
+                    max_redirects=0, timeout=self.timeout * 1000,
+                    ignore_https_errors=self.allow_insecure_tls)
+            await route.abort()  # too many redirects
+        except Exception as e:  # noqa: BLE001
+            self.logger.debug("render: checked fetch failed for %s: %s", hop, e)
+            try:
+                await route.abort()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _render_page(self, url: str) -> str | None:
         """Upstream ``_render_page`` plus an SSRF route guard: page JS can't
@@ -365,7 +407,10 @@ class GuardedFetchEngine(FetchEngine):
             return await super()._render_page(url)
         page = None
         try:
-            page = await self._browser.new_page(user_agent=self.user_agent)
+            # Service workers block: requests a worker makes never reach
+            # page.route, so a worker could fetch internal hosts unchecked.
+            page = await self._browser.new_page(user_agent=self.user_agent,
+                                                service_workers="block")
 
             async def _route(route):
                 req = route.request
@@ -374,10 +419,23 @@ class GuardedFetchEngine(FetchEngine):
                 elif await self.host_blocked(req.url):
                     self.logger.info("render: blocked request to %s", req.url)
                     await route.abort("blockedbyclient")
+                elif req.resource_type in ("fetch", "xhr"):
+                    await self._fetch_checked(route, page)
                 else:
                     await route.continue_()
 
+            async def _ws_route(ws):
+                # WebSockets bypass page.route entirely (and aren't CORS
+                # restricted), so they get their own check.
+                target = "http" + ws.url[2:] if ws.url.startswith("ws") else ws.url
+                if await self.host_blocked(target):
+                    self.logger.info("render: blocked websocket to %s", ws.url)
+                    await ws.close()
+                else:
+                    ws.connect_to_server()
+
             await page.route("**/*", _route)
+            await page.route_web_socket("**/*", _ws_route)
             await page.goto(url, wait_until="domcontentloaded",
                             timeout=self.render_timeout * 1000)
             try:
