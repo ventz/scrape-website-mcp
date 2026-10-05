@@ -93,7 +93,7 @@ Build options:
 docker build --build-arg SCRAPE_WEBSITE_REF=main -t scrape-website-mcp .
 
 # Pin to a tag or commit SHA
-docker build --build-arg SCRAPE_WEBSITE_REF=v0.7.3 -t scrape-website-mcp .
+docker build --build-arg SCRAPE_WEBSITE_REF=v0.7.2 -t scrape-website-mcp .
 ```
 
 ### Local dev
@@ -146,6 +146,8 @@ Two secrets, two sides. Neither party ever holds both:
 The MCP server checks `Authorization: Bearer <MCP_BEARER_TOKEN>` on every request. In platform-driven mode the server is asked only to return markdown; the platform owns the OpenAI side and never hands its key over. Even if a user modifies this server to log requests, no OpenAI key ever crosses the boundary.
 
 **Outbound targets are restricted.** Anyone holding the bearer token can ask the server to fetch a URL, so every fetch refuses private, loopback, link-local (including the cloud metadata endpoints `169.254.169.254` and `169.254.170.2`), CGNAT, reserved and multicast addresses. The check runs on the caller's URL and on **every redirect hop**, at DNS-resolution time (so DNS rebinding can't slip an internal IP in), in the curl_cffi fallback (hops are checked and pinned), for sitemap fetches, and inside headless Chromium (requests from page JavaScript to internal hosts are aborted). Blocked fetches return `status="failed"` with an `error` starting `blocked:`. Set `SCRAPER_ALLOW_PRIVATE_TARGETS=1` only if you deliberately scrape intranet hosts.
+
+The guard is defense in depth, not a network boundary. Headless Chromium resolves DNS itself after the guard checks a host, so a rebinding DNS server can still steer a page request to an internal address. An `HTTP(S)_PROXY` in the environment also bypasses the curl_cffi and sitemap pinning, because the proxy does its own DNS resolution. In production, block `169.254.0.0/16` and your VPC CIDRs at the container's egress (security group, NACL or iptables). Require IMDSv2 with a hop limit of 1.
 
 ---
 
