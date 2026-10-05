@@ -10,3 +10,5 @@ dist/
 build/
 *.egg-info/
 CLAUDE.local.md
+CLAUDE.md
+AGENTS.md
