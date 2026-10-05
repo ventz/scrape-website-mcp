@@ -1,10 +1,9 @@
-# Pin of ventz/scrape-website (branch, tag, or FULL commit SHA). The engine is
-# installed as an editable uv path dependency from $(VENDOR_DIR) — see
-# [tool.uv.sources].
+# Pin of ventz/scrape-website (branch, tag, or full SHA). The engine is installed
+# as an editable uv path dependency from $(VENDOR_DIR) — see [tool.uv.sources].
 # Current pin: 6d701c6 = 0.7.3, the robots.txt/sitemap.xml curl_cffi WAF
-# fallback release. Not on origin yet: until it is pushed, refresh from a local
-# checkout with `make update-scraper SCRAPE_WEBSITE_REPO=/path/to/scrape-website`.
-# Switch to the v0.7.3 tag once it exists upstream.
+# fallback release. On origin/main as of 2026-10-05; no v0.7.3 tag yet
+# (latest tag is v0.7.2). Switch SCRAPE_WEBSITE_REF to the tag once cut.
+# Use the full SHA — short SHAs fail with `git fetch --depth 1 <ref>`.
 SCRAPE_WEBSITE_REF ?= 6d701c69555edf71687c989f3615c93c2520d369
 SCRAPE_WEBSITE_REPO ?= https://github.com/ventz/scrape-website.git
 VENDOR_DIR := vendor/scrape-website
