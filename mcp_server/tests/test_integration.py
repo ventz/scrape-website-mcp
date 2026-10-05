@@ -77,7 +77,11 @@ def _tool_payload(result) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_engine():
+def _fresh_engine(monkeypatch):
+    # The fixture server listens on 127.0.0.1, which the SSRF guard refuses
+    # by default; these tests exercise the fetch pipeline, not the guard
+    # (see test_parity.py for that).
+    monkeypatch.setenv("SCRAPER_ALLOW_PRIVATE_TARGETS", "1")
     scraper.reset_engine()
     yield
     scraper.reset_engine()

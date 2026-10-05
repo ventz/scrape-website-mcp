@@ -58,14 +58,15 @@ Both modes are supported by the same tools; the platform just exercises a smalle
 
 | Tool | Used by platform? | Purpose |
 |------|------------------|---------|
-| `fetch_url_as_markdown(url, render_mode?)` | ✓ | Live one-shot scrape, returns markdown + metadata (HTTP status, page title, content bytes, fetch duration, plus `rendered`/`via`/`content_kind`). No vector store, no state. |
+| `fetch_url_as_markdown(url, ...)` | ✓ | Live one-shot scrape, returns markdown + metadata (HTTP status, page title, content bytes, fetch duration, ETag/Last-Modified, `rendered`/`via`/`content_kind`, page `classification`, `content_type`, parsed front-matter `metadata`). Optional knobs: `render_mode`, `extract_docs`, `timeout_s`, `render_settle_ms`, `max_file_size_bytes`, `respect_robots` (returns `status="skipped"` when disallowed), `include_html` / `include_document_base64` (size-capped raw payloads), `allow_insecure_tls` (only if the operator enables it). No vector store, no state. |
+| `fetch_urls_as_markdown(urls, concurrency=4, delay_ms=0, ...)` | — | Batch version: many URLs on any hosts, no crawling (the CLI's `--file`; also how to retry a crawl's `failed_urls`). Returns `{count, ok, empty, failed, skipped, results, warnings}`; each result is exactly a `fetch_url_as_markdown` result, in input order. Same knobs as above. |
 | `register_url(url, vector_store_id)` | — | Scrape the URL → upload as markdown into the given vector store, tagged with `source_url`, `content_hash`, `fetched_at` attributes. Idempotent. |
 | `resync_url(url)` | — | Re-scrape. If content hash changed, upload new file, wait for indexing, then delete the old VS file and the underlying File object. |
 | `resync_all()` | — | Run `resync_url` for every registered URL with bounded concurrency. Cron-friendly. |
 | `unregister_url(url)` | — | Remove the URL from the vector store and forget it. |
 | `list_registered()` | — | List everything this server is tracking. |
-| `crawl_site(seed_url, max_pages, max_depth, ...)` | ✓ | BFS crawl from a seed URL (same-FQDN scoped), returning markdown for every page reached. Respects robots.txt (protego; `Crawl-Delay` overrides `delay_ms` when declared), configurable depth/page limits and politeness delay. Supports `exclude_patterns` (regex list filtering CMS noise + images/static assets by default — **documents are no longer excluded**), `strip_tracking_params` (dedupes UTM variants), `use_sitemap` (seeds BFS from `/sitemap.xml`, sitemap-index aware), `render_mode` (`auto` renders SPA shells in headless Chromium), and `extract_docs` (default on: PDFs/Office files found while crawling are converted to Markdown; off skips fetching them). Emits MCP progress notifications per page (keep-alive on long crawls). |
-| `server_health()` | — | Cheap status check — DB ok, registered count, last `resync_all` run. |
+| `crawl_site(seed_url, max_pages, max_depth, ...)` | ✓ | BFS crawl from a seed URL (same-FQDN scoped), returning markdown for every page reached. Respects robots.txt (protego; `Crawl-Delay` overrides `delay_ms` when declared), configurable depth/page limits and politeness delay. Supports `exclude_patterns` (regex list filtering CMS noise + images/static assets by default — **documents are no longer excluded**), `strip_tracking_params` (dedupes UTM variants), `use_sitemap` (seeds BFS from `/sitemap.xml`, sitemap-index aware), `render_mode` (`auto` renders SPA shells in headless Chromium), and `extract_docs` (default on: PDFs/Office files found while crawling are converted to Markdown; off skips fetching them). Emits MCP progress notifications per page (keep-alive on long crawls). **0.3.0 opt-ins** (defaults keep 0.2.0 behavior): `concurrency` (default 1), `extra_exclude_patterns` (append to the defaults, like the CLI's `-e`), `exclude_patterns_case_sensitive`, `include_patterns`, `additional_seed_urls`, `collapse_host_aliases` (www/non-www and http/https as one site), `follow_offsite_documents` (CDN-hosted PDFs), `dedupe_documents`, `max_total_bytes`, plus the fetch knobs above. Results add upstream-shaped `stats`, `failed_urls` / `denied_urls` / `not_found_urls` / `challenged_urls`, `duplicate_documents`, `truncated` / `truncated_reason`, `warnings`, and the per-page keys listed for `fetch_url_as_markdown`. |
+| `server_health()` | — | Cheap status check — DB ok, registered count, last `resync_all` run, `server_version`, `scrape_website_version`, and a `capabilities` map (render / WAF / docs support, whether a cookies file is configured — never its path — and the server caps). |
 
 ---
 
@@ -92,7 +93,7 @@ Build options:
 docker build --build-arg SCRAPE_WEBSITE_REF=main -t scrape-website-mcp .
 
 # Pin to a tag or commit SHA
-docker build --build-arg SCRAPE_WEBSITE_REF=v0.5.0 -t scrape-website-mcp .
+docker build --build-arg SCRAPE_WEBSITE_REF=v0.7.3 -t scrape-website-mcp .
 ```
 
 ### Local dev
@@ -143,6 +144,8 @@ Two secrets, two sides. Neither party ever holds both:
 | `OPENAI_API_KEY` | The platform (resolved per-agent), **OR** this server (standalone only) | Platform: same SSM chain chat uses. Standalone: this server's `.env`. |
 
 The MCP server checks `Authorization: Bearer <MCP_BEARER_TOKEN>` on every request. In platform-driven mode the server is asked only to return markdown; the platform owns the OpenAI side and never hands its key over. Even if a user modifies this server to log requests, no OpenAI key ever crosses the boundary.
+
+**Outbound targets are restricted.** Anyone holding the bearer token can ask the server to fetch a URL, so every fetch refuses private, loopback, link-local (including the cloud metadata endpoints `169.254.169.254` and `169.254.170.2`), CGNAT, reserved and multicast addresses. The check runs on the caller's URL and on **every redirect hop**, at DNS-resolution time (so DNS rebinding can't slip an internal IP in), in the curl_cffi fallback (hops are checked and pinned), for sitemap fetches, and inside headless Chromium (requests from page JavaScript to internal hosts are aborted). Blocked fetches return `status="failed"` with an `error` starting `blocked:`. Set `SCRAPER_ALLOW_PRIVATE_TARGETS=1` only if you deliberately scrape intranet hosts.
 
 ---
 
@@ -217,12 +220,26 @@ All settings come from environment variables. `make run` and `docker run --env-f
 | `MCP_BEARER_TOKEN` | **yes** | — | Bearer token clients must present. Generate with `openssl rand -hex 32`. |
 | `OPENAI_API_KEY` | only for standalone use of OpenAI-side tools | — | Project-scoped key with `files:write` + `vector_stores:write`. **Not needed** in platform-driven mode. |
 | `STATE_DIR` | no | `./data` | Where the SQLite state file lives. |
-| `SCRAPE_WEBSITE_REF` | no | `main` | Git ref of `ventz/scrape-website` to pull in. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. |
+| `SCRAPE_WEBSITE_REF` | no | `6d701c6…` (0.7.3) | Git ref of `ventz/scrape-website` to pull in: branch, tag, or **full** commit SHA. Set at Docker build (`--build-arg`) or `make setup`/`make update-scraper`. Pinned for reproducible builds. |
 | `SCRAPER_USER_AGENT` | no | upstream Chrome UA | User-Agent for outbound fetches. **0.2.0 policy change:** the default is now a real-Chrome UA (was an honest `scrape-website-mcp/0.1` bot UA) because the WAF-clearance tier replays cookies bound to a Chrome UA. Set this to restore the honest bot UA if you don't need WAF handling. |
-| `SCRAPER_TIMEOUT` | no | `30` | Per-request timeout (seconds). |
+| `SCRAPER_TIMEOUT` | no | `30` | Per-request timeout (seconds). Per-call `timeout_s` overrides. |
+| `SCRAPER_MAX_TIMEOUT_S` | no | `120` | Upper bound for per-call `timeout_s`. |
+| `SCRAPER_MAX_RETRIES` | no | `3` | Retries for 429/5xx/transport errors (with backoff and `Retry-After`). |
 | `SCRAPER_RENDER_MODE` | no | `auto` | Server-wide default for JS rendering: `auto` \| `always` \| `never`. Per-call `render_mode` overrides. |
 | `SCRAPER_EXTRACT_DOCS` | no | `1` | Server-wide default for PDF/Office → Markdown extraction. Per-call `extract_docs` overrides. |
-| `SCRAPER_MAX_FILE_SIZE` | no | `52428800` (50 MB) | Documents larger than this are not extracted (`status="failed"`). |
+| `SCRAPER_MAX_FILE_SIZE` | no | `52428800` (50 MB) | Documents larger than this are not extracted (`status="failed"`); the static tier stops downloading as soon as the cap is crossed. Per-call `max_file_size_bytes` can only lower it. |
+| `SCRAPER_MAX_PAGE_SIZE` | no | `52428800` (50 MB) | Decompressed HTML cap (compression-bomb guard). |
+| `SCRAPER_RENDER_TIMEOUT` | no | `30` | Headless navigation timeout (seconds). |
+| `SCRAPER_RENDER_SETTLE_MS` | no | `3000` | Hydration wait after DOM load. Per-call `render_settle_ms` (0–15000) overrides. |
+| `SCRAPER_RENDER_CONCURRENCY` | no | `4` | Max simultaneous headless renders per engine. |
+| `SCRAPER_ALLOW_PRIVATE_TARGETS` | no | `0` | `1` disables the outbound-target guard (see [Auth model](#6-auth-model)). |
+| `SCRAPER_ALLOW_INSECURE_TLS` | no | `0` | `1` lets callers pass `allow_insecure_tls=true`; otherwise such calls fail with `insecure TLS disabled on this server`. |
+| `SCRAPER_MAX_CRAWL_CONCURRENCY` | no | `8` | Upper bound for `concurrency` on `crawl_site` and `fetch_urls_as_markdown`. |
+| `SCRAPER_MIN_DELAY_MS` | no | `0` | Floor for caller `delay_ms` (`100` is a sensible value for a shared server). |
+| `SCRAPER_MAX_BATCH_URLS` | no | `100` | Max URLs per `fetch_urls_as_markdown` call (extra URLs are dropped with a warning). |
+| `SCRAPER_MAX_RESPONSE_BYTES` | no | unset | When set, caps the payload a crawl returns even if the caller passes no `max_total_bytes`. Unset: callers' `max_total_bytes` is capped at 50 MB. |
+| `SCRAPER_MAX_INLINE_HTML_BYTES` | no | `2097152` (2 MB) | Cap for `include_html` (longer HTML is truncated, `html_truncated=true`). |
+| `SCRAPER_MAX_INLINE_DOC_BYTES` | no | `10485760` (10 MB) | Cap for `include_document_base64` (larger documents are omitted with a warning). |
 | `SCRAPER_BROWSER_ARGS` | no | (see notes) | Extra Chromium launch args (space-separated). Unset + `SCRAPER_IN_DOCKER=1` → `--disable-dev-shm-usage --no-sandbox`. |
 | `SCRAPER_IN_DOCKER` | no | set in image | Enables the container-safe Chromium launch args above. |
 | `SCRAPE_CF_COOKIES` | no | — | Path to an exported cookies file (JSON or Netscape) for WAF/Cloudflare clearance replay — the only headless-server-safe clearance source (`--human` is CLI/workstation-only). |

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from scrape_website.extract import is_access_denied
+from scrape_website.extract import classify_page
 from scrape_website.fetch import FetchOutcome, should_download_file
 
 from mcp_server import crawler
@@ -52,7 +52,8 @@ class FakeEngine:
     """Stand-in for scrape_website.FetchEngine serving canned pages.
 
     Mirrors the real engine's fetch_page contract: file short-circuit,
-    denied detection, run_extract on HTML, optional render escalation via
+    classify_page (denied / not_found / challenge short-circuit), run_extract
+    on HTML, optional render escalation via
     a scripted ``render_map`` (url -> hydrated HTML)."""
 
     def __init__(self, pages: dict[str, FakeResponse], *,
@@ -100,8 +101,10 @@ class FakeEngine:
                                headers=dict(resp.headers))
         if kind == "file":
             return outcome, set(), None
-        if is_access_denied(outcome.content, outcome.status):
-            outcome.denied = True
+        outcome.classification, outcome.detail = classify_page(
+            outcome.content, outcome.status, url)
+        if outcome.classification in ("denied", "not_found", "challenge"):
+            outcome.denied = outcome.classification in ("denied", "challenge")
             return outcome, set(), None
         links, text = await run_extract(outcome.content, url)
         mode = render_mode if render_mode is not None else self.render_mode_default
@@ -121,7 +124,8 @@ def _patch_engine():
     def _do(pages: dict[str, FakeResponse], **engine_kw):
         engine = FakeEngine(pages, **engine_kw)
 
-        def _build_engine(*, respect_robots=True, delay_between_requests=None):
+        def _build_engine(*, respect_robots=True, delay_between_requests=None,
+                          **_engine_overrides):
             engine.respect_robots = respect_robots
             return engine
 

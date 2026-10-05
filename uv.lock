@@ -2610,7 +2610,7 @@ dev = [
 
 [[package]]
 name = "scrape-website-mcp"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -2629,7 +2629,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.11" },
+    { name = "aiohttp", specifier = ">=3.12" },
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "openai", specifier = ">=1.50" },
     { name = "scrape-website", extras = ["render", "waf", "docs"], editable = "vendor/scrape-website" },

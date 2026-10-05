@@ -1,6 +1,6 @@
 [project]
 name = "scrape-website-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hosted MCP server that scrapes URLs into an OpenAI vector store with replace-by-URL semantics. Companion to ventz/scrape-website."
 readme = "README.md"
 license = { text = "MIT" }
@@ -9,7 +9,7 @@ authors = [{ name = "Ventz Petkov" }]
 dependencies = [
     "fastmcp>=2.0",
     "openai>=1.50",
-    "aiohttp>=3.11",
+    "aiohttp>=3.12",  # client middlewares (SSRF per-hop guard)
     "uvicorn[standard]>=0.30",
     # The shared fetch/crawl/extract engine. Extras: headless-Chromium render
     # escalation (render), curl_cffi WAF/403 fallback (waf), PDF/Office ->
