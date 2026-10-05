@@ -1,6 +1,11 @@
-# Pin of ventz/scrape-website (branch or tag). The engine is installed as an
-# editable uv path dependency from $(VENDOR_DIR) — see [tool.uv.sources].
-SCRAPE_WEBSITE_REF ?= main
+# Pin of ventz/scrape-website (branch, tag, or FULL commit SHA). The engine is
+# installed as an editable uv path dependency from $(VENDOR_DIR) — see
+# [tool.uv.sources].
+# Current pin: 6d701c6 = 0.7.3, the robots.txt/sitemap.xml curl_cffi WAF
+# fallback release. Not on origin yet: until it is pushed, refresh from a local
+# checkout with `make update-scraper SCRAPE_WEBSITE_REPO=/path/to/scrape-website`.
+# Switch to the v0.7.3 tag once it exists upstream.
+SCRAPE_WEBSITE_REF ?= 6d701c69555edf71687c989f3615c93c2520d369
 SCRAPE_WEBSITE_REPO ?= https://github.com/ventz/scrape-website.git
 VENDOR_DIR := vendor/scrape-website
 
@@ -9,8 +14,9 @@ VENDOR_DIR := vendor/scrape-website
 setup:
 	@if [ ! -d $(VENDOR_DIR)/.git ]; then \
 		echo "Cloning scrape-website@$(SCRAPE_WEBSITE_REF) into $(VENDOR_DIR)"; \
-		git clone --depth 1 --branch $(SCRAPE_WEBSITE_REF) \
-			$(SCRAPE_WEBSITE_REPO) $(VENDOR_DIR); \
+		git init -q $(VENDOR_DIR) \
+			&& git -C $(VENDOR_DIR) fetch --depth 1 $(SCRAPE_WEBSITE_REPO) $(SCRAPE_WEBSITE_REF) \
+			&& git -C $(VENDOR_DIR) reset --hard FETCH_HEAD; \
 	else \
 		echo "$(VENDOR_DIR) already present; run 'make update-scraper' to refresh."; \
 	fi
@@ -22,7 +28,7 @@ update-scraper:
 	@if [ ! -d $(VENDOR_DIR)/.git ]; then \
 		$(MAKE) setup; \
 	else \
-		cd $(VENDOR_DIR) && git fetch --depth 1 origin $(SCRAPE_WEBSITE_REF) \
+		cd $(VENDOR_DIR) && git fetch --depth 1 $(SCRAPE_WEBSITE_REPO) $(SCRAPE_WEBSITE_REF) \
 			&& git reset --hard FETCH_HEAD; \
 	fi
 	@# Why `reset --hard FETCH_HEAD` instead of `checkout FETCH_HEAD`:
@@ -31,7 +37,8 @@ update-scraper:
 	@# (the shallow clone can't see the parent chain so git thinks the
 	@# old tip is unreferenced). `reset --hard` produces the same working
 	@# tree quietly. Either way the vendored engine is read-only — we never
-	@# branch / commit / push from here.
+	@# branch / commit / push from here. Fetching by ref (not `clone --branch`)
+	@# is what lets the pin be a commit SHA; a SHA must be given in full.
 	uv lock -P scrape-website
 	uv sync
 

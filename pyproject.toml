@@ -15,7 +15,7 @@ dependencies = [
     # escalation (render), curl_cffi WAF/403 fallback (waf), PDF/Office ->
     # Markdown (docs). The `human` extra is deliberately NOT installed — the
     # interactive solve flow is workstation-only.
-    "scrape-website[render,waf,docs]>=0.5.0",
+    "scrape-website[render,waf,docs]>=0.7.3",
 ]
 
 [tool.uv.sources]

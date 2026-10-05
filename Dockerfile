@@ -1,9 +1,10 @@
 FROM python:3.13-slim
 
-# Pin of ventz/scrape-website (branch or tag) — the shared fetch/crawl engine,
-# installed as an editable uv path dependency from vendor/ (see
-# [tool.uv.sources] in pyproject.toml).
-ARG SCRAPE_WEBSITE_REF=main
+# Pin of ventz/scrape-website (branch, tag, or full commit SHA) — the shared
+# fetch/crawl engine, installed as an editable uv path dependency from vendor/
+# (see [tool.uv.sources] in pyproject.toml). 6d701c6 = 0.7.3 (robots/sitemap
+# curl_cffi fallback); until it is on origin, build with vendor/ in the context.
+ARG SCRAPE_WEBSITE_REF=6d701c69555edf71687c989f3615c93c2520d369
 ARG SCRAPE_WEBSITE_REPO=https://github.com/ventz/scrape-website.git
 
 RUN apt-get update \
@@ -19,8 +20,10 @@ WORKDIR /app
 # to cloning ${SCRAPE_WEBSITE_REF}.
 COPY pyproject.toml ./
 COPY vendo[r] /app/vendor
-RUN [ -d /app/vendor/scrape-website ] || git clone --depth 1 --branch ${SCRAPE_WEBSITE_REF} \
-    ${SCRAPE_WEBSITE_REPO} /app/vendor/scrape-website
+RUN [ -d /app/vendor/scrape-website ] || ( \
+    git init -q /app/vendor/scrape-website \
+    && git -C /app/vendor/scrape-website fetch --depth 1 ${SCRAPE_WEBSITE_REPO} ${SCRAPE_WEBSITE_REF} \
+    && git -C /app/vendor/scrape-website reset --hard FETCH_HEAD )
 RUN uv sync --no-dev
 
 # Chromium for the JS-render escalation tier. chromium-headless-shell is the
